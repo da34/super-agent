@@ -1,9 +1,9 @@
 import "dotenv/config";
-import { streamText, type ModelMessage, stepCountIs } from "ai";
+import { type ModelMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createInterface } from "node:readline";
 import { weatherTool, calculatorTool } from "./tools/utility-tools";
-import { agentLoop } from "./agent/loop";
+import { agentLoop, type BudgetState } from "./agent/loop";
 
 const tools = { get_weather: weatherTool, calculator: calculatorTool };
 
@@ -23,6 +23,8 @@ const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。
 回答要简洁直接。`;
 
+const budget: BudgetState = { used: 0, limit: 500 };
+
 const messages: ModelMessage[] = [];
 
 function ask() {
@@ -36,7 +38,7 @@ function ask() {
 
     messages.push({ role: "user", content: trimmed });
 
-    await agentLoop(model, tools, messages, SYSTEM);
+    await agentLoop(model, tools, messages, SYSTEM, budget);
 
     ask();
   });
