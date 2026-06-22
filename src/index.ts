@@ -2,10 +2,21 @@ import "dotenv/config";
 import { type ModelMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createInterface } from "node:readline";
-import { weatherTool, calculatorTool } from "./tools/utility-tools";
+import { ToolRegistry } from "./tool-registry";
+import { allTools } from "./tools/utility-tools";
 import { agentLoop, type BudgetState } from "./agent/loop";
 
-const tools = { get_weather: weatherTool, calculator: calculatorTool };
+const toolRegistry = new ToolRegistry();
+toolRegistry.register(...allTools);
+
+console.log(`已注册 ${toolRegistry.getAll().length} 个工具：`);
+for (const tool of toolRegistry.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? "可并发" : "串行",
+    tool.isReadOnly ? "只读" : "读写",
+  ].join(", ");
+  console.log(`  - ${tool.name}（${flags}）`);
+}
 
 const glm = createOpenAI({
   baseURL: "https://open.bigmodel.cn/api/paas/v4/",
@@ -23,7 +34,7 @@ const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。
 回答要简洁直接。`;
 
-const budget: BudgetState = { used: 0, limit: 500 };
+const budget: BudgetState = { used: 0, limit: 50000 };
 
 const messages: ModelMessage[] = [];
 
@@ -38,7 +49,7 @@ function ask() {
 
     messages.push({ role: "user", content: trimmed });
 
-    await agentLoop(model, tools, messages, SYSTEM, budget);
+    await agentLoop(model, toolRegistry, messages, SYSTEM, budget);
 
     ask();
   });

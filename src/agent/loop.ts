@@ -6,6 +6,7 @@ import {
   resetHistory,
 } from "../loop-detection";
 import { calculateDelay, isRetryable, sleep } from "../retry";
+import { ToolRegistry } from "../tool-registry";
 
 const MAX_STEPS = 10;
 const MAX_RETRIES = 3;
@@ -16,7 +17,7 @@ export interface BudgetState {
 
 export async function agentLoop(
   model: any,
-  tools: any,
+  registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
   budget: BudgetState,
@@ -40,9 +41,10 @@ export async function agentLoop(
       try {
         const result = streamText({
           model,
-          tools,
+          tools: registry.toAISDKFormat(),
           messages,
           system,
+          maxRetries: 0,
         });
         for await (const part of result.fullStream) {
           switch (part.type) {
@@ -76,7 +78,7 @@ export async function agentLoop(
               break;
 
             case "tool-result":
-              console.log(`  [结果: ${JSON.stringify(part.output)}]`);
+              console.log(`  [结果: ${previewToolResult(part.output)}]`);
 
               if (lastToolCall) {
                 recordResult(
@@ -112,14 +114,8 @@ export async function agentLoop(
 
     messages.push(...stepResponse.messages);
     // token 预算追踪
-    const inp =
-      typeof stepUsage?.inputTokens === "number"
-        ? stepUsage.inputTokens
-        : (stepUsage?.inputTokens?.total ?? 0);
-    const out =
-      typeof stepUsage?.outputTokens === "number"
-        ? stepUsage.outputTokens
-        : (stepUsage?.outputTokens?.total ?? 0);
+    const inp = stepUsage?.inputTokens ?? 0;
+    const out = stepUsage?.outputTokens ?? 0;
     budget.used += inp + out;
     const pct = Math.round((budget.used / budget.limit) * 100);
     console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%)`);
@@ -140,4 +136,9 @@ export async function agentLoop(
   if (step >= MAX_STEPS) {
     console.log("\n[达到最大步数限制，强制停止]");
   }
+}
+
+function previewToolResult(output: unknown): string {
+  const text = typeof output === "string" ? output : JSON.stringify(output);
+  return text.length > 120 ? `${text.slice(0, 120)}...` : text;
 }
