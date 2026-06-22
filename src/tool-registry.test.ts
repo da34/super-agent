@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { ToolDefinition, ToolRegistry } from "./tool-registry";
+import {
+  allTools,
+  bashTool,
+  editFileTool,
+  globTool,
+  grepTool,
+} from "./tools/utility-tools";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -232,4 +242,41 @@ test("未声明 isConcurrencySafe 的工具按串行执行", async () => {
   releaseA();
   await Promise.all([a, b]);
   assert.deepEqual(events, ["a:start", "a:end", "b:start"]);
+});
+
+test("新增内置工具可以编辑和搜索文件", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "super-agent-tools-"));
+  try {
+    const file = join(dir, "demo.ts");
+    await writeFile(file, "export const value = 1;\n", "utf8");
+
+    assert.deepEqual(
+      ["edit_file", "glob", "grep", "bash"].every((name) =>
+        allTools.some((tool) => tool.name === name),
+      ),
+      true,
+    );
+
+    await editFileTool.execute({
+      path: file,
+      old_string: "value = 1",
+      new_string: "value = 2",
+    });
+
+    assert.equal(await readFile(file, "utf8"), "export const value = 2;\n");
+    assert.equal(
+      await globTool.execute({ pattern: "**/*.ts", path: dir }),
+      "demo.ts",
+    );
+    assert.equal(
+      await grepTool.execute({ pattern: "value = 2", path: dir }),
+      "demo.ts:1: export const value = 2;",
+    );
+    assert.match(
+      String(await bashTool.execute({ command: "echo built-in-tools" })),
+      /built-in-tools/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
