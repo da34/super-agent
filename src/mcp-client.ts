@@ -40,6 +40,7 @@ export class MCPClient implements MCPToolClient {
   async connect(): Promise<void> {
     this.process = spawn(this.command, this.args, {
       stdio: ["pipe", "pipe", "pipe"],
+      shell: process.platform === "win32",
       env: {
         ...process.env,
         ...this.env,
