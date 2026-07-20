@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "tsx --test src/tool-registry.test.ts"
+    "test": "tsx --test src/tools/tool-registry.test.ts"
   },
   "keywords": [],
   "author": "",

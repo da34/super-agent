@@ -14,7 +14,7 @@ import {
   fetchUrlTool,
   globTool,
   grepTool,
-} from "./tools/utility-tools";
+} from "./utility-tools";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 

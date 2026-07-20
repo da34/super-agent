@@ -2,8 +2,8 @@ import "dotenv/config";
 import { type ModelMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createInterface } from "node:readline";
-import { MCPClient, MockMCPClient } from "./mcp-client";
-import { ToolDefinition, ToolRegistry } from "./tool-registry";
+import { MCPClient, MockMCPClient } from "./tools/mcp-client";
+import { ToolDefinition, ToolRegistry } from "./tools/tool-registry";
 import { allTools } from "./tools/utility-tools";
 import { agentLoop, type BudgetState } from "./agent/loop";
 

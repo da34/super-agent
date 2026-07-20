@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { ToolDefinition } from "../tool-registry";
+import type { ToolDefinition } from "./tool-registry";
 
 const execAsync = promisify(exec);
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
