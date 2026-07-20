@@ -118,7 +118,7 @@ export async function agentLoop(
     const out = stepUsage?.outputTokens ?? 0;
     budget.used += inp + out;
     const pct = Math.round((budget.used / budget.limit) * 100);
-    console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%)`);
+    console.log(`\n[Token] ${budget.used}/${budget.limit} (${pct}%)`);
     if (budget.used > budget.limit) {
       console.log("\n[Token 预算耗尽，强制停止]");
       break;
@@ -126,7 +126,7 @@ export async function agentLoop(
 
     // 没有工具调用了，可以退出了
     if (!hasToolCall) {
-      if (fullText) console.log(fullText);
+      if (fullText) console.log();
       break;
     }
 

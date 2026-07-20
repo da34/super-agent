@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "continue": "tsx src/index.ts --continue",
     "start": "tsx src/index.ts",
     "test": "tsx --test src/tools/tool-registry.test.ts"
   },
