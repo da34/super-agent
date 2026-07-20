@@ -6,7 +6,7 @@ import {
   resetHistory,
 } from "./loop-detection";
 import { calculateDelay, isRetryable, sleep } from "./retry";
-import { ToolRegistry } from "../tools/tool-registry";
+import type { ToolRegistry } from "../tools";
 
 const MAX_STEPS = 10;
 const MAX_RETRIES = 3;

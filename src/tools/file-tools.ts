@@ -1,77 +1,9 @@
-import { exec } from "node:child_process";
-import { createServer, type Server } from "node:http";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
+import { dirname, join, relative, resolve } from "node:path";
 import type { ToolDefinition } from "./tool-registry";
 
-const execAsync = promisify(exec);
 const SKIP_DIRS = new Set(["node_modules", ".git"]);
 const normalizePath = (path: string) => path.replaceAll("\\", "/");
-let previewServer: Server | null = null;
-
-const MIME_TYPES: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".ico": "image/x-icon",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain; charset=utf-8",
-  ".wasm": "application/wasm",
-};
-
-export const weatherTool: ToolDefinition = {
-  name: "get_weather",
-  description: "查询指定城市的天气信息",
-  parameters: {
-    type: "object",
-    properties: {
-      city: { type: "string", description: '城市名称，如"北京"、"上海"' },
-    },
-    required: ["city"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ city }: { city: string }) => {
-    // 先用假数据，后面课程会接真实 API
-    const mockWeather: Record<string, string> = {
-      北京: "晴，15-25°C，东南风 2 级",
-      上海: "多云，18-22°C，西南风 3 级",
-      深圳: "阵雨，22-28°C，南风 2 级",
-    };
-    return mockWeather[city] || `${city}：暂无数据`;
-  },
-};
-
-export const calculatorTool: ToolDefinition = {
-  name: "calculator",
-  description: "计算数学表达式的结果。当用户提问涉及数学运算时使用",
-  parameters: {
-    type: "object",
-    properties: {
-      expression: { type: "string", description: '数学表达式，如 "2 + 3 * 4"' },
-    },
-    required: ["expression"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ expression }: { expression: string }) => {
-    try {
-      // 生产环境不要用 eval，这里纯粹为了演示
-      const result = new Function(`return ${expression}`)();
-      return `${expression} = ${result}`;
-    } catch {
-      return `无法计算: ${expression}`;
-    }
-  },
-};
 
 export const readFileTool: ToolDefinition = {
   name: "read_file",
@@ -278,158 +210,6 @@ export const grepTool: ToolDefinition = {
   },
 };
 
-export const bashTool: ToolDefinition = {
-  name: "bash",
-  description: "执行 shell 命令并返回输出。适合运行脚本、检查环境、执行构建等操作",
-  parameters: {
-    type: "object",
-    properties: {
-      command: { type: "string", description: "要执行的 shell 命令" },
-    },
-    required: ["command"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: false,
-  isReadOnly: false,
-  maxResultChars: 3000,
-  execute: async ({ command }: { command: string }) => {
-    try {
-      await execAsync("echo test", { timeout: 1000, windowsHide: true });
-    } catch {
-      return "[bash 不可用] 当前环境不支持 shell 命令。本地终端运行可使用。";
-    }
-
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        encoding: "utf8",
-        timeout: 10000,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true,
-      });
-      return stdout + stderr || "(命令执行成功，无输出)";
-    } catch (error) {
-      const err = error as NodeJS.ErrnoException & {
-        stdout?: string;
-        stderr?: string;
-        code?: number | string;
-      };
-      return `命令执行失败 (exit ${err.code || 1}):\n${err.stderr || err.message}`;
-    }
-  },
-};
-
-export const startPreviewTool: ToolDefinition = {
-  name: "start_preview",
-  description: "启动 Node 内置 HTTP server，把 app/ 目录暴露到 8080 端口",
-  parameters: {
-    type: "object",
-    properties: {},
-    required: [],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: false,
-  isReadOnly: false,
-  execute: async () => {
-    if (previewServer?.listening) return "预览服务已运行: http://localhost:8080";
-
-    const appRoot = resolve("app");
-    const appStat = await stat(appRoot).catch(() => null);
-    if (!appStat?.isDirectory()) return `app/ 目录不存在: ${appRoot}`;
-
-    const server = createServer(async (request, response) => {
-      let target: string;
-      try {
-        const url = new URL(request.url || "/", "http://localhost");
-        target = resolve(appRoot, `.${decodeURIComponent(url.pathname)}`);
-      } catch {
-        response.writeHead(400).end("Bad Request");
-        return;
-      }
-
-      const insideApp = target === appRoot || target.startsWith(appRoot + sep);
-      if (!insideApp) {
-        response.writeHead(403).end("Forbidden");
-        return;
-      }
-
-      const targetStat = await stat(target).catch(() => null);
-      const file = targetStat?.isDirectory()
-        ? join(target, "index.html")
-        : target;
-      const content = await readFile(file).catch(() => null);
-      if (!content) {
-        response.writeHead(404).end("Not Found");
-        return;
-      }
-
-      response.writeHead(200, {
-        "Content-Type": MIME_TYPES[extname(file)] || "application/octet-stream",
-      });
-      response.end(content);
-    });
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(8080, () => {
-          server.off("error", reject);
-          resolve();
-        });
-      });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
-        return "端口 8080 已被占用";
-      }
-      throw error;
-    }
-
-    previewServer = server;
-    return "预览服务已启动: http://localhost:8080";
-  },
-};
-
-export const fetchUrlTool: ToolDefinition = {
-  name: "fetch_url",
-  description: "抓取 URL 内容，剥掉 script/style/HTML 标签后返回纯文本",
-  parameters: {
-    type: "object",
-    properties: {
-      url: { type: "string", description: "要抓取的 http/https URL" },
-    },
-    required: ["url"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ url }: { url: string }) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return `URL 无效: ${url}`;
-    }
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return "只支持 http/https URL";
-    }
-
-    const response = await fetch(parsed);
-    const text = stripHtml(await response.text());
-    return response.ok
-      ? text
-      : `请求失败 (${response.status} ${response.statusText}):\n${text}`;
-  },
-};
-
-// ponytail: 正则够剥常见页面正文；复杂 HTML 清洗再换 DOM parser。
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function globToRegExp(pattern: string): RegExp {
   const chars = normalizePath(pattern);
   let source = "^";
@@ -496,16 +276,11 @@ async function readTextFile(path: string): Promise<string | null> {
   return buffer.toString("utf8");
 }
 
-export const allTools: ToolDefinition[] = [
-  weatherTool,
-  calculatorTool,
+export const fileTools: ToolDefinition[] = [
   readFileTool,
   writeFileTool,
   listDirectoryTool,
   editFileTool,
   globTool,
   grepTool,
-  bashTool,
-  startPreviewTool,
-  fetchUrlTool,
 ];

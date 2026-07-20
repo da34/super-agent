@@ -5,8 +5,6 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MockMCPClient } from "./mcp-client";
-import { ToolDefinition, ToolRegistry } from "./tool-registry";
 import {
   allTools,
   bashTool,
@@ -14,7 +12,10 @@ import {
   fetchUrlTool,
   globTool,
   grepTool,
-} from "./utility-tools";
+  MockMCPClient,
+  type ToolDefinition,
+  ToolRegistry,
+} from ".";
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
