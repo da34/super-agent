@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { MockMCPClient } from "./mcp-client";
 import { ToolDefinition, ToolRegistry } from "./tool-registry";
 import {
   allTools,
   bashTool,
   editFileTool,
+  fetchUrlTool,
   globTool,
   grepTool,
 } from "./tools/utility-tools";
@@ -251,7 +255,7 @@ test("新增内置工具可以编辑和搜索文件", async () => {
     await writeFile(file, "export const value = 1;\n", "utf8");
 
     assert.deepEqual(
-      ["edit_file", "glob", "grep", "bash"].every((name) =>
+      ["edit_file", "glob", "grep", "bash", "start_preview", "fetch_url"].every((name) =>
         allTools.some((tool) => tool.name === name),
       ),
       true,
@@ -279,4 +283,53 @@ test("新增内置工具可以编辑和搜索文件", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("fetch_url 返回剥掉脚本样式和标签后的纯文本", async () => {
+  const server = createServer((_, response) => {
+    response.end(`
+      <style>.hidden { display: none; }</style>
+      <h1>Hello</h1>
+      <script>window.bad = true;</script>
+      <p>world</p>
+    `);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const { port } = server.address() as AddressInfo;
+    assert.equal(
+      await fetchUrlTool.execute({ url: `http://127.0.0.1:${port}/` }),
+      "Hello world",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test("MCP Server 可以注册到 ToolRegistry", async () => {
+  const registry = new ToolRegistry();
+  const registered = await registry.registerMCPServer(
+    "github",
+    new MockMCPClient(),
+  );
+
+  assert.deepEqual(registered, [
+    "mcp__github__list_issues",
+    "mcp__github__search_repositories",
+    "mcp__github__get_file_contents",
+  ]);
+
+  const tool = registry.get("mcp__github__search_repositories");
+  assert.ok(tool);
+  assert.equal(tool.isReadOnly, true);
+  assert.equal(tool.isConcurrencySafe, true);
+  assert.match(
+    String(await tool.execute({ query: "agent" })),
+    /vercel\/ai/,
+  );
+
+  await registry.closeAllMCP();
 });

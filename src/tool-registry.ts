@@ -1,4 +1,5 @@
 import { jsonSchema } from "ai";
+import type { MCPToolClient } from "./mcp-client";
 
 export interface ToolDefinition {
   name: string;
@@ -59,6 +60,7 @@ class ToolExecutionLock {
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
   private lock = new ToolExecutionLock();
+  private mcpClients: MCPToolClient[] = [];
 
   register(...tools: ToolDefinition[]): void {
     for (const tool of tools) {
@@ -72,6 +74,47 @@ export class ToolRegistry {
 
   getAll(): ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  async registerMCPServer(
+    serverName: string,
+    client: MCPToolClient,
+  ): Promise<string[]> {
+    await client.connect();
+    this.mcpClients.push(client);
+
+    const tools = await client.listTools();
+    const registered: string[] = [];
+
+    for (const tool of tools) {
+      const prefixedName = `mcp__${serverName}__${tool.name}`;
+      if (this.tools.has(prefixedName)) continue;
+
+      const toolClient = client;
+      const originalName = tool.name;
+
+      this.register({
+        name: prefixedName,
+        description: `[MCP:${serverName}] ${tool.description}`,
+        parameters: tool.inputSchema as Record<string, unknown>,
+        // ponytail: 先统一当成可并发只读，后续权限系统再细分写操作。
+        isConcurrencySafe: true,
+        isReadOnly: true,
+        maxResultChars: 3000,
+        execute: async (input: any) => toolClient.callTool(originalName, input),
+      });
+
+      registered.push(prefixedName);
+    }
+
+    return registered;
+  }
+
+  async closeAllMCP(): Promise<void> {
+    for (const client of this.mcpClients) {
+      await client.close();
+    }
+    this.mcpClients = [];
   }
 
   toAISDKFormat(): Record<string, any> {

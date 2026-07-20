@@ -126,7 +126,7 @@ export async function agentLoop(
 
     // 没有工具调用了，可以退出了
     if (!hasToolCall) {
-      if (fullText) console.log();
+      if (fullText) console.log(fullText);
       break;
     }
 
