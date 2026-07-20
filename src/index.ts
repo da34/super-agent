@@ -11,6 +11,14 @@ import {
 } from "./tools";
 import { agentLoop, type BudgetState } from "./agent/loop";
 import { SessionStore } from "./session/store";
+import {
+  coreRules,
+  deferredTools,
+  PromptBuilder,
+  PromptContext,
+  sessionContext,
+  toolGuide,
+} from "./context/prompt-builder";
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
@@ -114,8 +122,9 @@ async function main() {
   let messages: ModelMessage[] = [];
 
   // session 持久化
+  const sessionId = "default";
   const isContinue = process.argv.includes("--continue");
-  const store = new SessionStore("default");
+  const store = new SessionStore(sessionId);
   if (isContinue && store.exists()) {
     messages = store.load();
     console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
@@ -128,22 +137,29 @@ async function main() {
     output: process.stdout,
   });
 
-  const deferredSummary = toolRegistry.getDeferredToolSummary();
 
-  const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
-  需要查询信息时，主动使用工具，不要编造数据。
-  回答要简洁直接。${deferredSummary}`;
+
+  const builder = new PromptBuilder()
+    .pipe("coreRules", coreRules())
+    .pipe("toolGuide", toolGuide())
+    .pipe("deferredTools", deferredTools())
+    .pipe("sessionContext", sessionContext());
+
+  const deferredSummary = toolRegistry.getDeferredToolSummary();
+  const toolCount = toolRegistry.getActiveTools().length;
+
+  const promptCtx: PromptContext = {
+    toolCount: toolCount,
+    deferredToolSummary: deferredSummary,
+    sessionMessageCount: messages.length,
+    sessionId,
+  };
+
+  const SYSTEM = builder.build(promptCtx);
+  builder.debug(promptCtx); // 显示各模块状态
 
   const budget: BudgetState = { used: 0, limit: 50000 };
-
-  const allCount = toolRegistry.getAll().length;
-  const activeTools = toolRegistry.getActiveTools();
   const estimate = toolRegistry.countTokenEstimate();
-
-  console.log(`\n=== 工具统计 ===`);
-  console.log(`  全部工具: ${allCount} 个`);
-  console.log(`  活跃工具: ${activeTools.length} 个`);
-  console.log(`  延迟工具: ${allCount - activeTools.length} 个`);
   console.log(
     `  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`,
   );
