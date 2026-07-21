@@ -229,6 +229,7 @@ export function truncateResult(
 ): string {
   if (text.length <= maxChars) return text;
 
+
   const headSize = Math.floor(maxChars * 0.6);
   const tailSize = maxChars - headSize;
   const head = text.slice(0, headSize);
