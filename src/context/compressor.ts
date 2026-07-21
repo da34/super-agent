@@ -1,5 +1,8 @@
-import { ModelMessage } from "ai";
-import { textToolResultOutpur } from "./tool-result-output";
+import { generateText, ModelMessage } from "ai";
+import {
+  textToolResultOutpur,
+  toolResultOutputToText,
+} from "./tool-result-output";
 
 const CLEARABLE_TOOLS = new Set([
   "read_file",
@@ -52,7 +55,7 @@ export function microcompact(messages: ModelMessage[]): {
   // 保留最近 n 个工具结果不懂，只清理更早的
   const toClear = toolResultIndices.slice(
     0,
-    Math.max(0, toolResultIndices.length - KEEP_RECENT_TOOL_RESULTS),
+    Math.max(0, toolResultIndices.length - KEEP_RECENT_MESSAGES),
   );
 
   let cleared = 0;
@@ -62,17 +65,18 @@ export function microcompact(messages: ModelMessage[]): {
     const toolName = (msg.content[0] as any)?.toolName || "unknown";
     if (!CLEARABLE_TOOLS.has(toolName)) return msg;
 
-    cleared++
+    cleared++;
 
     return {
       ...msg,
-      content: msg.content.map(part => ({
-        ...part, output: textToolResultOutpur('[tool result cleared]')
-      }))
-    }
+      content: msg.content.map((part) => ({
+        ...part,
+        output: textToolResultOutpur("[tool result cleared]"),
+      })),
+    };
   });
 
-  return { messages: result, cleared }
+  return { messages: result, cleared };
 }
 
 export interface CompactionResult {
@@ -81,16 +85,16 @@ export interface CompactionResult {
   compressedCount: number;
 }
 
-function estimateTokens(messages: ModelMessage[]): number {
+export function estimateTokens(messages: ModelMessage[]): number {
   let chars = 0;
   for (const msg of messages) {
-    if (typeof msg.content === 'string') {
+    if (typeof msg.content === "string") {
       chars += msg.content.length;
     } else if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
-        if ('text' in part && typeof part.text === 'string') {
+        if ("text" in part && typeof part.text === "string") {
           chars += part.text.length;
-        } else if ('output' in part) {
+        } else if ("output" in part) {
           chars += JSON.stringify(part.output).length;
         }
       }
@@ -108,11 +112,80 @@ export interface CompactionResult {
 export async function summarize(
   model: any,
   messages: ModelMessage[],
-  existingSummary?: string
+  existingSummary?: string,
 ): Promise<CompactionResult> {
-  const tokenEstimate = estimateTokens(messages)
-  if (tokenEstimate < CONTEXT_TOKEN_THRESHOLD || messages.length <= KEEP_RECENT_MESSAGES) {
-    return { messages, summary: existingSummary || '', compressedCount: 0 };
+  const tokenEstimate = estimateTokens(messages);
+  if (
+    tokenEstimate < CONTEXT_TOKEN_THRESHOLD ||
+    messages.length <= KEEP_RECENT_MESSAGES
+  ) {
+    return { messages, summary: existingSummary || "", compressedCount: 0 };
   }
 
+  const splitIdx = Math.max(0, messages.length - KEEP_RECENT_MESSAGES);
+
+  let aligendIdx = splitIdx;
+
+  while (aligendIdx > 0 && messages[aligendIdx].role !== "user") {
+    aligendIdx--;
+  }
+
+  if (aligendIdx === 0) {
+    return { messages, summary: existingSummary || "", compressedCount: 0 };
+  }
+
+  const toCompress = messages.slice(0, aligendIdx);
+  const toKeep = messages.slice(aligendIdx);
+
+  const conversationText = toCompress
+    .map((msg) => {
+      const content =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .map((part) =>
+                  "text" in part
+                    ? part.text
+                    : "output" in part
+                      ? toolResultOutputToText(part.output)
+                      : "",
+                )
+                .join("")
+            : "";
+      return content ? `**${msg.role}**: ${content}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (!conversationText.trim()) {
+    return { messages, summary: existingSummary || "", compressedCount: 0 };
+  }
+
+  const userPrompt = existingSummary
+    ? `## 已有摘要（上一次压缩的结果）\n\n${existingSummary}\n\n## 需要压缩的新对话\n\n${conversationText}`
+    : conversationText;
+
+  try {
+    const { text: summary } = await generateText({
+      model,
+      system: COMPRESS_PROMPT,
+      prompt: userPrompt,
+    });
+
+    const summaryMessage: ModelMessage = {
+      role: "user",
+      content: `[以下是之前对话的压缩摘要]\n\n${summary}\n\n[摘要结束，以下是最近的对话]`,
+    };
+    const newMessages: ModelMessage[] = [summaryMessage, ...toKeep];
+
+    return {
+      messages: newMessages,
+      summary,
+      compressedCount: toCompress.length,
+    };
+  } catch (err) {
+    console.error("[Compaction] LLM 摘要失败:", err);
+    return { messages, summary: existingSummary || "", compressedCount: 0 };
+  }
 }

@@ -19,6 +19,7 @@ import {
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder";
+import { estimateTokens, microcompact, summarize } from "./context/compressor";
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
@@ -132,12 +133,45 @@ async function main() {
     console.log(`[Session] 新会话`);
   }
 
+  let summary = "";
+
+  // 压缩
+  const beforeTokens = estimateTokens(messages);
+  console.log(`\n[压缩前] ${messages.length} 条消息, ~${beforeTokens} tokens`);
+
+  // 层级1
+  const mc = microcompact(messages);
+  messages = mc.messages;
+  const afterMCTokens = estimateTokens(messages);
+  console.log(
+    `[Layer 1: Microcompact] 清理了 ${mc.cleared} 个工具结果, ~${afterMCTokens} tokens`,
+  );
+
+  // 层级2
+  const compResult = await summarize(model, messages, summary);
+  messages = compResult.messages;
+  summary = compResult.summary;
+  const afterSumTokens = estimateTokens(messages);
+  if (compResult.compressedCount > 0) {
+    console.log(
+      `[Layer 2: Summarization] 压缩了 ${compResult.compressedCount} 条消息, ~${afterSumTokens} tokens`,
+    );
+    console.log(`[摘要预览] ${summary.slice(0, 150)}...`);
+  } else {
+    console.log(`[Layer 2: Summarization] 未触发（消息量不够）`);
+  }
+
+  console.log(
+    `[压缩后] ${messages.length} 条消息, ~${afterSumTokens} tokens (节省 ${beforeTokens - afterSumTokens} tokens)\n`,
+  );
+
+  // Clear injected history for chat — compression demo is done
+  messages = [];
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
   });
-
-
 
   const builder = new PromptBuilder()
     .pipe("coreRules", coreRules())
@@ -158,7 +192,7 @@ async function main() {
   const SYSTEM = builder.build(promptCtx);
   builder.debug(promptCtx); // 显示各模块状态
 
-  const budget: BudgetState = { used: 0, limit: 50000 };
+  const budget: BudgetState = { used: 0, limit: 500000 };
   const estimate = toolRegistry.countTokenEstimate();
   console.log(
     `  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`,
@@ -185,6 +219,26 @@ async function main() {
       // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
       const newMessages = messages.slice(beforeLen);
       store.appendAll(newMessages);
+
+      // 检查是否需要压缩
+      const currentTokens = estimateTokens(messages);
+      console.log(currentTokens, 'currentTokens')
+      if (currentTokens > 4000) {
+        console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
+        const mc2 = microcompact(messages);
+        messages = mc2.messages;
+        if (mc2.cleared > 0)
+          console.log(`  [Microcompact] 清理了 ${mc2.cleared} 个工具结果`);
+
+        const comp2 = await summarize(model, messages, summary);
+        if (comp2.compressedCount > 0) {
+          messages = comp2.messages;
+          summary = comp2.summary;
+          console.log(
+            `  [Summarization] 压缩了 ${comp2.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+          );
+        }
+      }
 
       ask();
     });
