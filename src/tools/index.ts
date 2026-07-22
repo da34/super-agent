@@ -8,6 +8,7 @@ export * from "./file-tools";
 export * from "./general-tools";
 export * from "./mcp-client";
 export * from "./shell-tools";
+export * from "./tool-search";
 export * from "./tool-registry";
 export * from "./web-tools";
 

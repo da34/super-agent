@@ -4,7 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createInterface } from "node:readline";
 import {
   allTools,
-  type ToolDefinition,
+  createToolSearchTool,
   ToolRegistry,
 } from "./tools";
 import { agentLoop } from "./agent/loop";
@@ -17,51 +17,21 @@ import {
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder";
-import {
-  applyDefense,
-  estimateMessageTokens,
-} from "./context/defense";
-import { textToolResultOutput } from "./context/tool-result-output";
 import { UsageTracker } from "./usage/tracker";
 import {
-  buildContextSnapshot,
-  renderContextView,
-  renderUsageView,
-} from "./context/view";
+  createDispatcher,
+  type CommandContext,
+} from "./commands";
+import {
+  debugCommands,
+  injectSimulatedHistory,
+  runDefense,
+} from "./commands/debug";
+import { contextCommands } from "./commands/context";
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
-
-const toolSearchTool: ToolDefinition = {
-  name: "tool_search",
-  description:
-    "获取延迟工具的完整定义。传入工具名（从系统提示的延迟工具列表中选取），返回该工具的完整参数 Schema",
-  parameters: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        description:
-          '工具名，如 "mcp__github__list_issues"。支持逗号分隔多个工具名',
-      },
-    },
-    required: ["query"],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ query }: { query: string }) => {
-    const results = toolRegistry.searchTools(query);
-    if (results.length === 0) return `没有找到匹配 "${query}" 的工具`;
-    return results.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }));
-  },
-};
-
-toolRegistry.register(toolSearchTool);
+toolRegistry.register(createToolSearchTool(toolRegistry));
 
 const glm = createOpenAI({
   baseURL: "https://open.bigmodel.cn/api/paas/v4/",
@@ -69,6 +39,10 @@ const glm = createOpenAI({
 });
 
 const model = glm.chat("glm-4.7");
+const dispatch = createDispatcher([
+  ...debugCommands,
+  ...contextCommands,
+]);
 
 function printRegisteredTools() {
   console.log(`已注册 ${toolRegistry.getAll().length} 个工具：`);
@@ -79,80 +53,6 @@ function printRegisteredTools() {
     ].join(", ");
     console.log(`  - ${tool.name}（${flags}）`);
   }
-}
-
-function injectSimulatedHistory(
-  messages: ModelMessage[],
-  timestamps: Map<number, number>,
-  groups = 4,
-  resultChars = 2_000,
-): void {
-  const now = Date.now();
-  const ages = [12, 7, 4, 1];
-
-  for (let index = 0; index < groups; index++) {
-    const toolCallId = `simulated-read-${now}-${index}`;
-    const ageMinutes = ages[index % ages.length];
-    const createdAt = now - ageMinutes * 60_000;
-    const startIndex = messages.length;
-
-    messages.push(
-      { role: "user", content: `读取模拟文件 ${index + 1}` },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId,
-            toolName: "read_file",
-            input: { path: `simulated-${index + 1}.txt` },
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId,
-            toolName: "read_file",
-            output: textToolResultOutput(
-              `模拟文件 ${index + 1} 开始\n${"context data\n".repeat(
-                Math.ceil(resultChars / 13),
-              )}模拟文件 ${index + 1} 结束`,
-            ),
-          },
-        ],
-      },
-    );
-
-    for (let offset = 0; offset < 3; offset++) {
-      timestamps.set(startIndex + offset, createdAt);
-    }
-  }
-}
-
-function runDefense(
-  messages: ModelMessage[],
-  timestamps: Map<number, number>,
-): ModelMessage[] {
-  const beforeTokens = estimateMessageTokens(messages);
-  const defense = applyDefense(messages, timestamps);
-
-  console.log("\n=== 三层即时防线 ===");
-  console.log(`[防线前] ${messages.length} 条消息, ~${beforeTokens} tokens`);
-  console.log(
-    `[Layer 2: 截断] ${defense.truncated} 个超长结果被截断, ${defense.compacted} 个结果因预算被清理`,
-  );
-  console.log(
-    `[Layer 3: TTL] ${defense.softPruned} 个软修剪, ${defense.hardPruned} 个硬清除`,
-  );
-  console.log(
-    `[防线后] ${defense.messages.length} 条消息, ~${defense.tokenEstimate} tokens (节省 ${beforeTokens - defense.tokenEstimate})`,
-  );
-  console.log("====================");
-
-  return defense.messages;
 }
 
 async function main() {
@@ -222,56 +122,19 @@ async function main() {
         return;
       }
 
-      if (trimmed === "status") {
-        console.log(
-          `[Status] ${messages.length} 条消息, ~${estimateMessageTokens(messages)} tokens`,
-        );
-        ask();
-        return;
-      }
-
-      if (trimmed === "/context" || trimmed === "context") {
-        const snapshot = buildContextSnapshot({
-          modelName: "GLM 4.7",
-          modelId: "glm-4.7",
-          windowTokens: 200_000,
-          systemPromptChars: SYSTEM.length,
-          toolDescriptionChars: toolRegistry
-            .getActiveTools()
-            .reduce(
-              (total, tool) =>
-                total +
-                tool.name.length +
-                tool.description.length +
-                JSON.stringify(tool.parameters).length,
-              0,
-            ),
-          memoryChars: 0,
-          skillsChars: 0,
-          messages,
-        });
-        console.log(renderContextView(snapshot));
-        ask();
-        return;
-      }
-
-      if (trimmed === "/usage" || trimmed === "usage") {
-        console.log(renderUsageView(usageTracker));
-        ask();
-        return;
-      }
-
-      if (trimmed === "sim") {
-        injectSimulatedHistory(messages, timestamps, 20, 2_000);
-        console.log(
-          `[Sim] 已注入 20 组模拟工具历史，当前 ~${estimateMessageTokens(messages)} tokens`,
-        );
-        ask();
-        return;
-      }
-
-      if (trimmed === "defend") {
-        messages = runDefense(messages, timestamps);
+      const commandContext: CommandContext = {
+        messages,
+        timestamps,
+        registry: toolRegistry,
+        tracker: usageTracker,
+        systemPrompt: SYSTEM,
+        modelName: "GLM 4.7",
+        modelId: "glm-4.7",
+        windowTokens: 200_000,
+      };
+      const handled = dispatch(trimmed, commandContext);
+      if (handled === "async") return;
+      if (handled) {
         ask();
         return;
       }
