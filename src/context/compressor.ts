@@ -61,6 +61,8 @@ export function microcompact(messages: ModelMessage[]): {
   let cleared = 0;
   const result = messages.map((msg, idx) => {
     if (!toClear.includes(idx)) return msg;
+    if (msg.role !== "tool") return msg;
+    if (!Array.isArray(msg.content)) return msg;
 
     const toolName = (msg.content[0] as any)?.toolName || "unknown";
     if (!CLEARABLE_TOOLS.has(toolName)) return msg;
@@ -69,10 +71,14 @@ export function microcompact(messages: ModelMessage[]): {
 
     return {
       ...msg,
-      content: msg.content.map((part) => ({
-        ...part,
-        output: textToolResultOutpur("[tool result cleared]"),
-      })),
+      content: msg.content.map((part) =>
+        "output" in part
+          ? {
+              ...part,
+              output: textToolResultOutpur("[tool result cleared]"),
+            }
+          : part,
+      ),
     };
   });
 

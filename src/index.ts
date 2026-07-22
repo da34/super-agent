@@ -4,8 +4,6 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createInterface } from "node:readline";
 import {
   allTools,
-  MCPClient,
-  MockMCPClient,
   type ToolDefinition,
   ToolRegistry,
 } from "./tools";
@@ -19,7 +17,11 @@ import {
   sessionContext,
   toolGuide,
 } from "./context/prompt-builder";
-import { estimateTokens, microcompact, summarize } from "./context/compressor";
+import {
+  applyDefense,
+  estimateMessageTokens,
+} from "./context/defense";
+import { textToolResultOutput } from "./context/tool-result-output";
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
@@ -62,50 +64,6 @@ const glm = createOpenAI({
 
 const model = glm.chat("glm-4.7");
 
-async function connectMCP() {
-  const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
-
-  let canSpawn = true;
-  try {
-    const { execSync } = await import("node:child_process");
-    execSync("echo test", { stdio: "ignore" });
-  } catch {
-    canSpawn = false;
-  }
-
-  if (githubToken && canSpawn) {
-    console.log("\n连接 GitHub MCP Server...");
-    const isWindows = process.platform === "win32";
-    try {
-      const client = new MCPClient(
-        "npx",
-        ["-y", "@modelcontextprotocol/server-github"],
-        {
-          GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
-        },
-      );
-      const tools = await toolRegistry.registerMCPServer("github", client);
-      console.log(`  已注册 ${tools.length} 个 MCP 工具`);
-      return;
-    } catch (error) {
-      console.log(
-        `  MCP 连接失败: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      console.log("  降级为 Mock MCP...");
-    }
-  }
-
-  if (!githubToken) {
-    console.log("\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，使用 Mock MCP");
-  } else if (!canSpawn) {
-    console.log("\n当前环境不支持启动子进程，使用 Mock MCP");
-  }
-
-  const mockClient = new MockMCPClient();
-  const tools = await toolRegistry.registerMCPServer("github", mockClient);
-  console.log(`  已注册 ${tools.length} 个 Mock MCP 工具`);
-}
-
 function printRegisteredTools() {
   console.log(`已注册 ${toolRegistry.getAll().length} 个工具：`);
   for (const tool of toolRegistry.getAll()) {
@@ -117,10 +75,83 @@ function printRegisteredTools() {
   }
 }
 
-async function main() {
-  await connectMCP();
+function injectSimulatedHistory(
+  messages: ModelMessage[],
+  timestamps: Map<number, number>,
+  groups = 4,
+  resultChars = 2_000,
+): void {
+  const now = Date.now();
+  const ages = [12, 7, 4, 1];
 
+  for (let index = 0; index < groups; index++) {
+    const toolCallId = `simulated-read-${now}-${index}`;
+    const ageMinutes = ages[index % ages.length];
+    const createdAt = now - ageMinutes * 60_000;
+    const startIndex = messages.length;
+
+    messages.push(
+      { role: "user", content: `读取模拟文件 ${index + 1}` },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId,
+            toolName: "read_file",
+            input: { path: `simulated-${index + 1}.txt` },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId,
+            toolName: "read_file",
+            output: textToolResultOutput(
+              `模拟文件 ${index + 1} 开始\n${"context data\n".repeat(
+                Math.ceil(resultChars / 13),
+              )}模拟文件 ${index + 1} 结束`,
+            ),
+          },
+        ],
+      },
+    );
+
+    for (let offset = 0; offset < 3; offset++) {
+      timestamps.set(startIndex + offset, createdAt);
+    }
+  }
+}
+
+function runDefense(
+  messages: ModelMessage[],
+  timestamps: Map<number, number>,
+): ModelMessage[] {
+  const beforeTokens = estimateMessageTokens(messages);
+  const defense = applyDefense(messages, timestamps);
+
+  console.log("\n=== 三层即时防线 ===");
+  console.log(`[防线前] ${messages.length} 条消息, ~${beforeTokens} tokens`);
+  console.log(
+    `[Layer 2: 截断] ${defense.truncated} 个超长结果被截断, ${defense.compacted} 个结果因预算被清理`,
+  );
+  console.log(
+    `[Layer 3: TTL] ${defense.softPruned} 个软修剪, ${defense.hardPruned} 个硬清除`,
+  );
+  console.log(
+    `[防线后] ${defense.messages.length} 条消息, ~${defense.tokenEstimate} tokens (节省 ${beforeTokens - defense.tokenEstimate})`,
+  );
+  console.log("====================");
+
+  return defense.messages;
+}
+
+async function main() {
   let messages: ModelMessage[] = [];
+  const timestamps = new Map<number, number>();
 
   // session 持久化
   const sessionId = "default";
@@ -128,45 +159,15 @@ async function main() {
   const store = new SessionStore(sessionId);
   if (isContinue && store.exists()) {
     messages = store.load();
+    messages.forEach((_, index) => timestamps.set(index, Date.now()));
     console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
   } else {
-    console.log(`[Session] 新会话`);
-  }
-
-  let summary = "";
-
-  // 压缩
-  const beforeTokens = estimateTokens(messages);
-  console.log(`\n[压缩前] ${messages.length} 条消息, ~${beforeTokens} tokens`);
-
-  // 层级1
-  const mc = microcompact(messages);
-  messages = mc.messages;
-  const afterMCTokens = estimateTokens(messages);
-  console.log(
-    `[Layer 1: Microcompact] 清理了 ${mc.cleared} 个工具结果, ~${afterMCTokens} tokens`,
-  );
-
-  // 层级2
-  const compResult = await summarize(model, messages, summary);
-  messages = compResult.messages;
-  summary = compResult.summary;
-  const afterSumTokens = estimateTokens(messages);
-  if (compResult.compressedCount > 0) {
+    injectSimulatedHistory(messages, timestamps);
     console.log(
-      `[Layer 2: Summarization] 压缩了 ${compResult.compressedCount} 条消息, ~${afterSumTokens} tokens`,
+      `[Session] 新会话（已注入 ${messages.length} 条模拟历史，时间跨度 12 分钟）`,
     );
-    console.log(`[摘要预览] ${summary.slice(0, 150)}...`);
-  } else {
-    console.log(`[Layer 2: Summarization] 未触发（消息量不够）`);
   }
-
-  console.log(
-    `[压缩后] ${messages.length} 条消息, ~${afterSumTokens} tokens (节省 ${beforeTokens - afterSumTokens} tokens)\n`,
-  );
-
-  // Clear injected history for chat — compression demo is done
-  messages = [];
+  messages = runDefense(messages, timestamps);
 
   const rl = createInterface({
     input: process.stdin,
@@ -208,36 +209,46 @@ async function main() {
         rl.close();
         return;
       }
+
+      if (trimmed === "status") {
+        console.log(
+          `[Status] ${messages.length} 条消息, ~${estimateMessageTokens(messages)} tokens`,
+        );
+        ask();
+        return;
+      }
+
+      if (trimmed === "sim") {
+        injectSimulatedHistory(messages, timestamps, 20, 2_000);
+        console.log(
+          `[Sim] 已注入 20 组模拟工具历史，当前 ~${estimateMessageTokens(messages)} tokens`,
+        );
+        ask();
+        return;
+      }
+
+      if (trimmed === "defend") {
+        messages = runDefense(messages, timestamps);
+        ask();
+        return;
+      }
+
       const userMsg: ModelMessage = { role: "user", content: trimmed };
       store.append(userMsg);
       messages.push(userMsg);
+      timestamps.set(messages.length - 1, Date.now());
 
-      await agentLoop(model, toolRegistry, messages, SYSTEM, budget);
+      // 每次请求模型前先执行零 LLM 成本的即时防御。
+      messages = runDefense(messages, timestamps);
 
       const beforeLen = messages.length;
+      await agentLoop(model, toolRegistry, messages, SYSTEM, budget);
 
       // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
       const newMessages = messages.slice(beforeLen);
       store.appendAll(newMessages);
-
-      // 检查是否需要压缩
-      const currentTokens = estimateTokens(messages);
-      console.log(currentTokens, 'currentTokens')
-      if (currentTokens > 4000) {
-        console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
-        const mc2 = microcompact(messages);
-        messages = mc2.messages;
-        if (mc2.cleared > 0)
-          console.log(`  [Microcompact] 清理了 ${mc2.cleared} 个工具结果`);
-
-        const comp2 = await summarize(model, messages, summary);
-        if (comp2.compressedCount > 0) {
-          messages = comp2.messages;
-          summary = comp2.summary;
-          console.log(
-            `  [Summarization] 压缩了 ${comp2.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
-          );
-        }
+      for (let index = beforeLen; index < messages.length; index++) {
+        timestamps.set(index, Date.now());
       }
 
       ask();
