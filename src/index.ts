@@ -7,7 +7,7 @@ import {
   type ToolDefinition,
   ToolRegistry,
 } from "./tools";
-import { agentLoop, type BudgetState } from "./agent/loop";
+import { agentLoop } from "./agent/loop";
 import { SessionStore } from "./session/store";
 import {
   coreRules,
@@ -22,6 +22,12 @@ import {
   estimateMessageTokens,
 } from "./context/defense";
 import { textToolResultOutput } from "./context/tool-result-output";
+import { UsageTracker } from "./usage/tracker";
+import {
+  buildContextSnapshot,
+  renderContextView,
+  renderUsageView,
+} from "./context/view";
 
 const toolRegistry = new ToolRegistry();
 toolRegistry.register(...allTools);
@@ -157,6 +163,7 @@ async function main() {
   const sessionId = "default";
   const isContinue = process.argv.includes("--continue");
   const store = new SessionStore(sessionId);
+  const usageTracker = new UsageTracker(".usage/today.jsonl");
   if (isContinue && store.exists()) {
     messages = store.load();
     messages.forEach((_, index) => timestamps.set(index, Date.now()));
@@ -193,12 +200,17 @@ async function main() {
   const SYSTEM = builder.build(promptCtx);
   builder.debug(promptCtx); // 显示各模块状态
 
-  const budget: BudgetState = { used: 0, limit: 500000 };
   const estimate = toolRegistry.countTokenEstimate();
   console.log(
     `  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`,
   );
   printRegisteredTools();
+  console.log("快捷命令：");
+  console.log("  /context — 查看上下文占用矩阵");
+  console.log("  /usage   — 查看 Token、缓存命中率与成本");
+  console.log("  status   — 查看当前消息数与 Token 估算");
+  console.log("  sim      — 注入模拟工具历史");
+  console.log("  defend   — 手动执行上下文防御");
 
   function ask() {
     rl.question("\nYou: ", async (input) => {
@@ -214,6 +226,37 @@ async function main() {
         console.log(
           `[Status] ${messages.length} 条消息, ~${estimateMessageTokens(messages)} tokens`,
         );
+        ask();
+        return;
+      }
+
+      if (trimmed === "/context" || trimmed === "context") {
+        const snapshot = buildContextSnapshot({
+          modelName: "GLM 4.7",
+          modelId: "glm-4.7",
+          windowTokens: 200_000,
+          systemPromptChars: SYSTEM.length,
+          toolDescriptionChars: toolRegistry
+            .getActiveTools()
+            .reduce(
+              (total, tool) =>
+                total +
+                tool.name.length +
+                tool.description.length +
+                JSON.stringify(tool.parameters).length,
+              0,
+            ),
+          memoryChars: 0,
+          skillsChars: 0,
+          messages,
+        });
+        console.log(renderContextView(snapshot));
+        ask();
+        return;
+      }
+
+      if (trimmed === "/usage" || trimmed === "usage") {
+        console.log(renderUsageView(usageTracker));
         ask();
         return;
       }
@@ -242,7 +285,7 @@ async function main() {
       messages = runDefense(messages, timestamps);
 
       const beforeLen = messages.length;
-      await agentLoop(model, toolRegistry, messages, SYSTEM, budget);
+      await agentLoop(model, toolRegistry, messages, SYSTEM, usageTracker);
 
       // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
       const newMessages = messages.slice(beforeLen);

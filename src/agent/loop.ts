@@ -7,22 +7,24 @@ import {
 } from "./loop-detection";
 import { calculateDelay, isRetryable, sleep } from "./retry";
 import type { ToolRegistry } from "../tools";
+import {
+  normalizeUsage,
+  type UsageTracker,
+} from "../usage/tracker";
 
 const MAX_STEPS = 10;
 const MAX_RETRIES = 3;
-export interface BudgetState {
-  used: number;
-  limit: number;
-}
+const TOKEN_BUDGET = 500_000;
 
 export async function agentLoop(
   model: any,
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
-  budget: BudgetState,
+  tracker?: UsageTracker,
 ) {
   let step = 0;
+  let totalTokens = 0;
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -113,13 +115,40 @@ export async function agentLoop(
     }
 
     messages.push(...stepResponse.messages);
-    // token 预算追踪
-    const inp = stepUsage?.inputTokens ?? 0;
-    const out = stepUsage?.outputTokens ?? 0;
-    budget.used += inp + out;
-    const pct = Math.round((budget.used / budget.limit) * 100);
-    console.log(`\n[Token] ${budget.used}/${budget.limit} (${pct}%)`);
-    if (budget.used > budget.limit) {
+    // 输入、缓存读写和输出必须分开计价，不能只累计 totalTokens。
+    const normalizedUsage = normalizeUsage(stepUsage);
+    const stepRecord = tracker?.record(
+      model?.modelId ?? "mock-model",
+      normalizedUsage,
+    );
+    totalTokens +=
+      normalizedUsage.inputTokens +
+      normalizedUsage.outputTokens +
+      normalizedUsage.cacheReadTokens +
+      normalizedUsage.cacheWriteTokens;
+
+    if (
+      stepRecord &&
+      (normalizedUsage.cacheReadTokens > 0 ||
+        normalizedUsage.cacheWriteTokens > 0)
+    ) {
+      const cacheHit = normalizedUsage.cacheReadTokens > 0;
+      const tag = cacheHit
+        ? "\x1b[38;5;36m✓ cache hit\x1b[0m"
+        : "\x1b[38;5;220m✎ cache write\x1b[0m";
+      const detail = cacheHit
+        ? `read ${normalizedUsage.cacheReadTokens}`
+        : `write ${normalizedUsage.cacheWriteTokens}`;
+      console.log(
+        `  [${tag}] ${detail} tokens · 本步 $${stepRecord.cost.toFixed(5)}`,
+      );
+    }
+
+    const usedPercentage = Math.round((totalTokens / TOKEN_BUDGET) * 100);
+    console.log(
+      `\n[Token] ${totalTokens}/${TOKEN_BUDGET} (${usedPercentage}%)`,
+    );
+    if (totalTokens > TOKEN_BUDGET) {
       console.log("\n[Token 预算耗尽，强制停止]");
       break;
     }

@@ -21,6 +21,7 @@ pnpm-debug.log*
 
 # Runtime data
 pids/
+.usage/
 *.pid
 *.seed
 *.pid.lock
